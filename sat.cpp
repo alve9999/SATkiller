@@ -4,11 +4,9 @@
 #include <fstream>
 #include <vector>
 #include <iostream>
-
-template <typename T>
-constexpr int sgn(T val) {
-    return (T(0) < val) - (val < T(0));
-}
+#include <thread>
+#include <chrono>
+#include <atomic>
 
 using namespace std;
 
@@ -304,12 +302,24 @@ bool DPLL(Problem& problem, vector<int8_t>& assignment) {
 }
 
 
+atomic<bool> finished(false);
+
+void watchdog(int seconds) {
+    this_thread::sleep_for(chrono::seconds(seconds));
+    if (!finished.load()) {
+        cerr << "Timeout reached! Terminating solver.\n";
+        exit(1);
+    }
+}
+
 int main() {
     Problem sat_problem = parse(cin);
 
+    thread(watchdog, 10).detach();
+
     vector<int8_t> assignment(sat_problem.nvars + 1, 0);
     if (DPLL(sat_problem, assignment)) {
-        for (int i = 1; i <= sat_problem.nvars; ++i) {
+        for (int i = 1; i < sat_problem.nvars+1; i++) {
             cout << "x" << i << " = " << (assignment[i] > 0 ? "true" : "false") << '\n';
         }
         cout << "SATISFIABLE\n";
@@ -317,5 +327,6 @@ int main() {
         cout << "UNSATISFIABLE\n";
     }
 
+    cout.flush();
     return 0;
 }
