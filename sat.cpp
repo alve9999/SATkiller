@@ -1,20 +1,25 @@
+#include <atomic>
+#include <chrono>
+#include <iostream>
 #include <sstream>
 #include <string>
-#include <utility>
-#include <fstream>
-#include <vector>
-#include <iostream>
 #include <thread>
-#include <chrono>
-#include <atomic>
+#include <utility>
+#include <vector>
 
 using namespace std;
+
+struct clause_header {
+    int start;
+    int end;
+    bool satisfied;
+};
 
 struct Problem {
     int nvars;
     int nclauses;
     vector<int> literals;
-    vector<size_t> clause_starts;
+    vector<clause_header> clauses;
     vector<int> literals_in_clauses;
     vector<size_t> literals_in_clauses_starts;
     vector<int> pos_count;
@@ -22,36 +27,40 @@ struct Problem {
     Problem(int nvars, int nclauses) : nvars(nvars), nclauses(nclauses) {}
 };
 
-ostream& operator<<(ostream& os, const Problem& prob) {
-    os << "Problem: " << prob.nvars << " vars, " << prob.nclauses << " clauses\n";
+ostream &operator<<(ostream &os, const Problem &prob) {
+    os << "Problem: " << prob.nvars << " vars, " << prob.nclauses
+       << " clauses\n";
     for (int i = 0; i < prob.nclauses; ++i) {
-        os << "Clause " << i+1 << ": ";
-        size_t start = prob.clause_starts[i];
-        size_t end = (i + 1 < prob.clause_starts.size()) ? prob.clause_starts[i + 1] : prob.literals.size();
+        os << "Clause " << i + 1 << ": ";
+        size_t start = prob.clauses[i].start;
+        size_t end = prob.clauses[i].end;
         for (size_t j = start; j < end; ++j) {
             int lit = prob.literals[j];
-            if (lit < 0) os << " ¬";
-            else os << " ";
+            if (lit < 0)
+                os << " ¬";
+            else
+                os << " ";
             os << "x" << abs(lit);
-            if (j + 1 < end) os << " ∨";
+            if (j + 1 < end)
+                os << " ∨";
         }
         os << '\n';
     }
 
     os << "\nVariable to clauses mapping:\n";
     for (int v = 1; v <= prob.nvars; ++v) {
-        size_t start = prob.literals_in_clauses_starts[v-1];
+        size_t start = prob.literals_in_clauses_starts[v - 1];
         size_t end = prob.literals_in_clauses_starts[v];
         os << "x" << v << " in clauses:";
         for (size_t i = start; i < end; ++i) {
-            os << " " << prob.literals_in_clauses[i]+1;
+            os << " " << prob.literals_in_clauses[i] + 1;
         }
         os << '\n';
     }
     return os;
 }
 
-pair<int,int> parse_dimacs_header(const string& line) {
+pair<int, int> parse_dimacs_header(const string &line) {
     istringstream in(line);
     string ignore1, ignore2;
     int nvars, nclauses;
@@ -59,7 +68,7 @@ pair<int,int> parse_dimacs_header(const string& line) {
     return {nvars, nclauses};
 }
 
-Problem parse(istream& in) {
+Problem parse(istream &in) {
     string line;
     getline(in, line);
     auto [nvars, nclauses] = parse_dimacs_header(line);
@@ -67,23 +76,34 @@ Problem parse(istream& in) {
 
     int var;
     bool new_clause = true;
+    int prev_start = -1;
     while (in >> var) {
         if (var == 0) {
             new_clause = true;
         } else {
             if (new_clause) {
-                problem.clause_starts.push_back(problem.literals.size());
+                if (prev_start != -1) {
+                    clause_header ch;
+                    ch.start = prev_start;
+                    ch.end = problem.literals.size();
+                    ch.satisfied = false;
+                }
+                prev_start = problem.literals.size();
                 new_clause = false;
             }
             problem.literals.push_back(var);
         }
     }
-    problem.clause_starts.push_back(problem.literals.size());
+    clause_header ch;
+    ch.start = prev_start;
+    ch.end = problem.literals.size();
+    ch.satisfied = false;
+    problem.clauses.push_back(ch);
 
     vector<vector<int>> temp_var_to_clauses(nvars + 1);
     for (int i = 0; i < nclauses; i++) {
-        size_t start = problem.clause_starts[i];
-        size_t end = problem.clause_starts[i + 1];
+        size_t start = problem.clauses[i].start;
+        size_t end = problem.clauses[i].end;
         for (size_t j = start; j < end; j++) {
             int v = abs(problem.literals[j]);
             temp_var_to_clauses[v].push_back(i);
@@ -92,20 +112,21 @@ Problem parse(istream& in) {
 
     problem.literals_in_clauses_starts.push_back(0);
     for (int v = 1; v < nvars + 1; v++) {
-        problem.literals_in_clauses.insert(
-            problem.literals_in_clauses.end(),
-            temp_var_to_clauses[v].begin(),
-            temp_var_to_clauses[v].end()
-        );
-        problem.literals_in_clauses_starts.push_back(problem.literals_in_clauses.size());
+        problem.literals_in_clauses.insert(problem.literals_in_clauses.end(),
+                                           temp_var_to_clauses[v].begin(),
+                                           temp_var_to_clauses[v].end());
+        problem.literals_in_clauses_starts.push_back(
+            problem.literals_in_clauses.size());
     }
     vector<int> pos_count(nvars + 1, 0);
     vector<int> neg_count(nvars + 1, 0);
 
     for (int lit : problem.literals) {
         int var = abs(lit);
-        if (lit > 0) pos_count[var]++;
-        else neg_count[var]++;
+        if (lit > 0)
+            pos_count[var]++;
+        else
+            neg_count[var]++;
     }
     problem.pos_count = std::move(pos_count);
     problem.neg_count = std::move(neg_count);
@@ -114,55 +135,86 @@ Problem parse(istream& in) {
     return problem;
 }
 
-
-void assign_literal(Problem& problem, vector<int8_t>& assignment, vector<int>& local_assignments, int var, int val) {
+void assign_literal(Problem &problem, vector<int8_t> &assignment,
+                    vector<int> &local_assignments, int var, int val) {
     assignment[var] = val;
     local_assignments.push_back(var);
-    
-    // Update the counts for the variable
-    if (val == 1) {
-        size_t start = problem.literals_in_clauses_starts[var - 1];
-        size_t end = problem.literals_in_clauses_starts[var];
-        for (size_t i = start; i < end; i++) {
-            int clause_index = problem.literals_in_clauses[i];
-            problem.neg_count[var]--;
+
+    /*size_t start = problem.literals_in_clauses_starts[var - 1];
+    size_t end = problem.literals_in_clauses_starts[var];
+
+    for (size_t i = start; i < end; i++) {
+        int clause_index = problem.literals_in_clauses[i];
+        size_t clause_start = problem.clause_starts[clause_index];
+        size_t clause_end = problem.clause_starts[clause_index + 1];
+
+        // check if clause is now satisfied by this assignment
+        bool clause_satisfied = false;
+        for (size_t j = clause_start; j < clause_end; j++) {
+            int lit = problem.literals[j];
+            int lit_var = abs(lit);
+            int lit_val = assignment[lit_var];
+            if ((lit > 0 && lit_val == 1) || (lit < 0 && lit_val == -1)) {
+                clause_satisfied = true;
+                break;
+            }
         }
-    } else {
-        size_t start = problem.literals_in_clauses_starts[var - 1];
-        size_t end = problem.literals_in_clauses_starts[var];
-        for (size_t i = start; i < end; i++) {
-            int clause_index = problem.literals_in_clauses[i];
-            problem.pos_count[var]--;
+
+        if (clause_satisfied) {
+            // clause is true → all its literals are now irrelevant
+            for (size_t j = clause_start; j < clause_end; j++) {
+                int lit = problem.literals[j];
+                int v = abs(lit);
+                if (lit > 0)
+                    problem.pos_count[v]--;
+                else
+                    problem.neg_count[v]--;
+            }
         }
-    }
+    }*/
 }
 
-void unassign_literal(Problem& problem, vector<int8_t>& assignment, int var) {
-    int val = assignment[var];
-    if (val == 0) return;
+void unassign_literal(Problem &problem, vector<int8_t> &assignment, int var) {
+    assignment[var] = 0; // unassign
 
-    assignment[var] = 0;
+    /*size_t start = problem.literals_in_clauses_starts[var - 1];
+    size_t end = problem.literals_in_clauses_starts[var];
 
-    if (val == 1) {
-        size_t start = problem.literals_in_clauses_starts[var - 1];
-        size_t end = problem.literals_in_clauses_starts[var];
-        for (size_t i = start; i < end; i++) {
-            int clause_index = problem.literals_in_clauses[i];
-            problem.neg_count[var]++;
+    for (size_t i = start; i < end; i++) {
+        int clause_index = problem.literals_in_clauses[i];
+        size_t clause_start = problem.clause_starts[clause_index];
+        size_t clause_end = problem.clause_starts[clause_index + 1];
+
+        // check if clause was satisfied and now might become unsatisfied
+        bool clause_satisfied = false;
+        for (size_t j = clause_start; j < clause_end; j++) {
+            int lit = problem.literals[j];
+            int lit_var = abs(lit);
+            int lit_val = assignment[lit_var];
+            if ((lit > 0 && lit_val == 1) || (lit < 0 && lit_val == -1)) {
+                clause_satisfied = true;
+                break;
+            }
         }
-    } else {
-        size_t start = problem.literals_in_clauses_starts[var - 1];
-        size_t end = problem.literals_in_clauses_starts[var];
-        for (size_t i = start; i < end; i++) {
-            int clause_index = problem.literals_in_clauses[i];
-            problem.pos_count[var]++;
+
+        if (!clause_satisfied) {
+            // clause may now need its literal counts restored
+            for (size_t j = clause_start; j < clause_end; j++) {
+                int lit = problem.literals[j];
+                int v = abs(lit);
+                if (lit > 0)
+                    problem.pos_count[v]++;
+                else
+                    problem.neg_count[v]++;
+            }
         }
-    }
+    }*/
 }
 
-int is_unit_clause(Problem& problem, size_t clause_index, vector<int8_t>& assignment) {
-    size_t start = problem.clause_starts[clause_index];
-    size_t end = problem.clause_starts[clause_index + 1];
+int is_unit_clause(Problem &problem, size_t clause_index,
+                   vector<int8_t> &assignment) {
+    size_t start = problem.clauses[clause_index].start;
+    size_t end = problem.clauses[clause_index].end;
 
     int unit_literal = 0;
     for (size_t i = start; i < end; i++) {
@@ -179,13 +231,15 @@ int is_unit_clause(Problem& problem, size_t clause_index, vector<int8_t>& assign
     return unit_literal; // Returns the unit literal if found, or 0 if none
 }
 
-bool propagate_units(Problem& problem, vector<int8_t>& assignment, vector<int>& local_assignments) {
+bool propagate_units(Problem &problem, vector<int8_t> &assignment,
+                     vector<int> &local_assignments) {
     vector<int> unit_stack;
     unit_stack.reserve(problem.nvars);
 
     for (int i = 0; i < problem.nclauses; i++) {
         int lit = is_unit_clause(problem, i, assignment);
-        if (lit != 0) unit_stack.push_back(lit);
+        if (lit != 0)
+            unit_stack.push_back(lit);
     }
 
     while (!unit_stack.empty()) {
@@ -219,9 +273,11 @@ bool propagate_units(Problem& problem, vector<int8_t>& assignment, vector<int>& 
     return true; // no conflicts
 }
 
-void assign_pure_literals(Problem& problem, vector<int8_t>& assignment, vector<int>& local_assignments) {
+void assign_pure_literals(Problem &problem, vector<int8_t> &assignment,
+                          vector<int> &local_assignments) {
     for (int var = 1; var <= problem.nvars; var++) {
-        if (assignment[var] != 0) continue; // skip already assigned
+        if (assignment[var] != 0)
+            continue; // skip already assigned
 
         if (problem.pos_count[var] > 0 && problem.neg_count[var] == 0) {
             assign_literal(problem, assignment, local_assignments, var, 1);
@@ -231,19 +287,23 @@ void assign_pure_literals(Problem& problem, vector<int8_t>& assignment, vector<i
     }
 }
 
-bool DPLL(Problem& problem, vector<int8_t>& assignment) {
+bool CDCL(Problem &problem, vector<int8_t> &assignment) {
+    vector<vector<int>> local_assignments;
+    vector<vector<int>> falsified_clauses;
+}
+
+bool DPLL(Problem &problem, vector<int8_t> &assignment) {
     vector<int> local_assignments;
-    if(!propagate_units(problem, assignment,local_assignments)) {
+    if (!propagate_units(problem, assignment, local_assignments)) {
         for (int var : local_assignments) {
             unassign_literal(problem, assignment, var);
         }
         return false; // Conflict found during unit propagation
     }
-    assign_pure_literals(problem, assignment, local_assignments);
 
     int remaining_lit = -1;
 
-    for(int i = 1; i < problem.nvars + 1; i++){
+    for (int i = 1; i < problem.nvars + 1; i++) {
         if (assignment[i] == 0) {
             remaining_lit = i;
             break;
@@ -255,8 +315,8 @@ bool DPLL(Problem& problem, vector<int8_t>& assignment) {
 
     // Check if any clause is unsatisfied
     for (int i = 0; i < problem.nclauses; i++) {
-        size_t start = problem.clause_starts[i];
-        size_t end = problem.clause_starts[i + 1];
+        size_t start = problem.clauses[i].start;
+        size_t end = problem.clauses[i].end;
         bool clause_satisfied = false;
         bool has_unassigned = false;
 
@@ -301,7 +361,6 @@ bool DPLL(Problem& problem, vector<int8_t>& assignment) {
     return false;
 }
 
-
 atomic<bool> finished(false);
 
 void watchdog(int seconds) {
@@ -315,12 +374,15 @@ void watchdog(int seconds) {
 int main() {
     Problem sat_problem = parse(cin);
 
-    thread(watchdog, 10).detach();
+    thread(watchdog, 20).detach();
 
     vector<int8_t> assignment(sat_problem.nvars + 1, 0);
+    vector<int> local_assignments;
+    assign_pure_literals(sat_problem, assignment, local_assignments);
     if (DPLL(sat_problem, assignment)) {
-        for (int i = 1; i < sat_problem.nvars+1; i++) {
-            cout << "x" << i << " = " << (assignment[i] > 0 ? "true" : "false") << '\n';
+        for (int i = 1; i < sat_problem.nvars + 1; i++) {
+            cout << "x" << i << " = " << (assignment[i] > 0 ? "true" : "false")
+                 << '\n';
         }
         cout << "SATISFIABLE\n";
     } else {
